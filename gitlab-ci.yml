@@ -1,0 +1,114 @@
+image: docker:latest
+
+services:
+  - docker:dind
+
+stages:
+  - build
+  - deploy
+
+.authenticate: &authenticate
+    - echo "$CI_JOB_JWT_V2" > $AWS_WEB_IDENTITY_TOKEN_FILE
+
+variables:
+  ECR_REPO_URL: 'public.ecr.aws/f0l3p7l5/ameera-wordpress-app.com'
+  AWS_DEFAULT_REGION: 'us-east-1'
+  ECR_REGISTRY: 'public.ecr.aws/f0l3p7l5'
+  ECR_REPOSITORY: 'ameera-wordpress-app.com'
+  SSH_DIR: '/root/.ssh'
+  TERRAFORM_VERSION: '0.15.5'
+  AWS_ACCOUNT_ID: '425342967151'
+  AWS_ROLE_ARN: arn:aws:iam::425342967151:role/CICD_Role_AllowAll
+  AWS_WEB_IDENTITY_TOKEN_FILE: /tmp/web-identity-token
+
+deploy:
+  stage: deploy
+  script:
+    - *authenticate
+    - aws sts get-caller-identity
+
+before_script:
+  - apk add --no-cache curl py-pip python3 groff git groff openssh-client
+  - pip install --upgrade awscli
+  - apk add --update curl unzip bash jq
+  - python3 -m ensurepip
+  - python3 -m pip install --upgrade pip
+  - python3 -m pip install --upgrade awscli
+  
+  - apk add docker
+
+  - curl -LO "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+  - unzip "terraform_${TERRAFORM_VERSION}_linux_amd64.zip" -d /usr/local/bin/
+  - chmod +x /usr/local/bin/terraform
+  - terraform --version
+
+  - *authenticate
+  
+build:
+  stage: build
+  script:
+    
+    - *authenticate
+    - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/$AWS_ACCOUNT_ID
+    - docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA .
+    - docker push $ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA
+
+deploy:
+  stage: deploy
+  image: docker:stable
+  script:  
+    - |
+      # Ensure that the ~/.ssh/ directory exists
+      mkdir -p ~/.ssh/
+      chmod 700 ~/.ssh/
+
+      echo "$CI_JOB_JWT_V2" > /tmp/web-identity-token
+      export AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/web-identity-token      
+      aws --version
+      
+      # Configure the AWS CLI with ameera-user1's credentials
+      #aws configure set aws_access_key_id $AMEERA_USER1_ACCESS_KEY
+      #aws configure set aws_secret_access_key $AMEERA_USER1_SECRET_KEY
+      #aws configure set default.region $AWS_DEFAULT_REGION
+      #aws --version
+
+      # Assume the 'cicdpolicy' role
+      #assume_role_output=$(aws sts assume-role --role-arn arn:aws:iam::425342967151:role/CICD-Role --role-session-name GitLabAssumeRoleSession)
+      #export AWS_ACCESS_KEY_ID=$(echo "$assume_role_output" | jq -r '.Credentials.AccessKeyId')
+      #export AWS_SECRET_ACCESS_KEY=$(echo "$assume_role_output" | jq -r '.Credentials.SecretAccessKey')
+      #export AWS_SESSION_TOKEN=$(echo "$assume_role_output" | jq -r '.Credentials.SessionToken')
+      #aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+      #aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+      #aws configure set aws_session_token $AWS_SESSION_TOKEN
+
+      # Getting IPs and parsing to a shell array
+      PRIVATE_EC2_IPS=$(terraform output -json private_ips | jq -r '.[]')
+      JUMP_SERVER_IP=$(terraform output -json jump_server_public_ip | jq -r '.')
+
+      # Print IPs for debugging
+      echo "Private IPs: $PRIVATE_EC2_IPS"
+      echo "Jump server IP: $JUMP_SERVER_IP"
+
+      # Use the SSH private key directly in the SSH commands
+      echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+      chmod 600 ~/.ssh/id_rsa
+      eval $(ssh-agent)
+      ssh-add ~/.ssh/id_rsa
+
+      # Write the public key to a temporary file
+      echo "$SSH_PUBLIC_KEY" > ~/.ssh/id_rsa.pub
+
+      # Copy SSH_PRIVATE_KEY to the Jump Server's /home/ec2-user directory
+      scp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ~/.ssh/id_rsa ec2-user@$JUMP_SERVER_IP:/home/ec2-user/.ssh/id_rsa
+      ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ec2-user@$JUMP_SERVER_IP "chmod 600 /home/ec2-user/.ssh/id_rsa"
+
+      for IP in $PRIVATE_EC2_IPS; do
+        ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ec2-user@$JUMP_SERVER_IP "ssh -o StrictHostKeyChecking=no -i /home/ec2-user/.ssh/id_rsa ec2-user@$IP 'sudo systemctl stop httpd && sudo docker pull $ECR_REPO_URL:$CI_COMMIT_SHA && sudo docker run -d -p 80:80 $ECR_REPO_URL:$CI_COMMIT_SHA'"
+        ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ec2-user@$JUMP_SERVER_IP "ssh -o StrictHostKeyChecking=no -i /home/ec2-user/.ssh/id_rsa ec2-user@$IP 'sudo docker ps -a'"  # Display container information
+        ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ec2-user@$JUMP_SERVER_IP "ssh -o StrictHostKeyChecking=no -i /home/ec2-user/.ssh/id_rsa ec2-user@$IP 'sudo docker logs \$(sudo docker ps -lq)'"  # Display container logs
+      done
+
+      echo "Done with Pipelines"
+
+      # Cleanup the temporary key files
+      rm ~/.ssh/id_rsa ~/.ssh/id_rsa.pub
