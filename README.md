@@ -30,7 +30,7 @@ The application in focus is a simple Python web app, which will be containerized
 
 ## CI/CD Pipeline
 
-The CI/CD pipeline is pivotal in automating the app deployment process. Let's delve into the specific stages:
+The CI/CD pipeline is pivotal in automating the app deployment process. The pipeline script is defined in the .gitlab-ci.yml. Let's delve into the specific stages:
 
 1. **Build Stage**: 
 - Authenticates with AWS and logs into the ECR repository.
