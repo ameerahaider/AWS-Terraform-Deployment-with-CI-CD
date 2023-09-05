@@ -17,8 +17,6 @@ variables:
   ECR_REPOSITORY: 'ameera-wordpress-app.com'
   SSH_DIR: '/root/.ssh'
   TERRAFORM_VERSION: '0.15.5'
-  AWS_ACCOUNT_ID: '425342967151'
-  AWS_ROLE_ARN: arn:aws:iam::425342967151:role/CICD_Role_AllowAll
   AWS_WEB_IDENTITY_TOKEN_FILE: /tmp/web-identity-token
 
 deploy:
